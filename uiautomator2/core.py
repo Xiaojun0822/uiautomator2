@@ -16,19 +16,19 @@ from typing import Any, Dict, Optional
 import adbutils
 import requests
 
-from uiautomator2.exceptions import RPCInvalidError, UiAutomationNotConnectedError, HTTPError, LaunchUiAutomationError, \
-    UiObjectNotFoundError, RPCUnknownError, APKSignatureError, AccessibilityServiceAlreadyRegisteredError
+from uiautomator2.exceptions import RPCInvalidError, RPCStackOverflowError, UiAutomationNotConnectedError, HTTPError, LaunchUiAutomationError, UiObjectNotFoundError, RPCUnknownError, APKSignatureError, AccessibilityServiceAlreadyRegisteredError
 from uiautomator2.abstract import AbstractUiautomatorServer
+from uiautomator2.utils import is_version_compatiable
+from uiautomator2.version import __apk_version__
+
 
 logger = logging.getLogger(__name__)
-
 
 class MockAdbProcess:
     def __init__(self, conn: adbutils.AdbConnection) -> None:
         self._conn = conn
         self._event = threading.Event()
         self._output = bytearray()
-
         def wait_finished():
             try:
                 while chunk := self._conn.conn.recv(1024):
@@ -37,12 +37,12 @@ class MockAdbProcess:
             except:
                 pass
             self._event.set()
-
+        
         t = threading.Thread(target=wait_finished)
         t.daemon = True
         t.name = "wait_adb_conn"
         t.start()
-
+    
     @property
     def output(self) -> bytes:
         """ subprocess do not have this property """
@@ -67,9 +67,7 @@ def launch_uiautomator(dev: adbutils.AdbDevice) -> MockAdbProcess:
     dev.shell("am force-stop com.github.uiautomator")
     dev.shell("am start -n com.github.uiautomator/.ToastActivity")
     # use command to see if uiautomator is running: ps -A | grep uiautomator
-    conn = dev.shell(
-        "am instrument -w -r -e debug false -e class com.github.uiautomator.stub.Stub com.github.uiautomator.test/androidx.test.runner.AndroidJUnitRunner",
-        stream=True)
+    conn = dev.shell("am instrument -w -r -e debug false -e class com.github.uiautomator.stub.Stub com.github.uiautomator.test/androidx.test.runner.AndroidJUnitRunner", stream=True)
     process = MockAdbProcess(conn)
     return process
 
@@ -77,7 +75,7 @@ def launch_uiautomator(dev: adbutils.AdbDevice) -> MockAdbProcess:
 class HTTPResponse:
     def __init__(self, content: bytes) -> None:
         self.content = content
-
+    
     def json(self):
         return json.loads(self.content)
 
@@ -86,8 +84,7 @@ class HTTPResponse:
         return self.content.decode("utf-8", errors="ignore")
 
 
-def _http_request(dev: adbutils.AdbDevice, method: str, path: str, data: Dict[str, Any] = None, timeout=10,
-                  print_request: bool = False) -> HTTPResponse:
+def _http_request(dev: adbutils.AdbDevice, method: str, path: str, data: Dict[str, Any] = None, timeout=10, print_request: bool = False) -> HTTPResponse:
     """Send http request to uiautomator2 server"""
     try:
         logger.debug("http request %s %s %s", method, path, data)
@@ -130,7 +127,7 @@ def _jsonrpc_call(dev: adbutils.AdbDevice, method: str, params: Any, timeout: fl
     data = r.json()
     if not isinstance(data, dict):
         raise RPCInvalidError("Unknown RPC error: not a dict")
-
+    
     if isinstance(data, dict) and "error" in data:
         logger.debug("jsonrpc error: %s", data)
         code = data['error'].get('code')
@@ -143,8 +140,10 @@ def _jsonrpc_call(dev: adbutils.AdbDevice, method: str, params: Any, timeout: fl
             raise UiAutomationNotConnectedError("android.os.DeadObjectException")
         if "uiautomator.UiObjectNotFoundException" in message:
             raise UiObjectNotFoundError(code, message, params)
+        if "java.lang.StackOverflowError" in message:
+            raise RPCStackOverflowError(f"StackOverflowError: {message}", params, stacktrace[:1000] + "..." + stacktrace[-1000:])
         raise RPCUnknownError(f"Unknown RPC error: {code} {message}", params, stacktrace)
-
+    
     if "result" not in data:
         raise RPCInvalidError("Unknown RPC error: no result field")
     return data["result"]
@@ -154,15 +153,14 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
     """ Simple uiautomator2 server client
     this is runs without atx-agent
     """
-
     def __init__(self, dev: adbutils.AdbDevice) -> None:
         self._dev = dev
         self._process = None
         self._lock = threading.Lock()
         self._debug = False
         self.start_uiautomator()
-        atexit.register(self.stop_uiautomator)
-
+        atexit.register(self.stop_uiautomator, wait=False)
+    
     @property
     def debug(self) -> bool:
         return self._debug
@@ -179,7 +177,7 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
             self._dev.uninstall("com.github.uiautomator")
             self._dev.uninstall("com.github.uiautomator.test")
             self._do_start_uiautomator()
-
+    
     def _do_start_uiautomator(self):
         """
         Start uiautomator2 server
@@ -201,24 +199,18 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
         main_apk = assets_dir / "app-uiautomator.apk"
         test_apk = assets_dir / "app-uiautomator-test.apk"
 
-        # get apk version
-        version_text = assets_dir / "version.txt"
-        apk_version = None
-        for line in version_text.read_text('utf-8').splitlines():
-            k, v = line.split(":")
-            if k == "apk_version":
-                apk_version = v.strip()
-                break
-        logger.debug("use apk_version: %s", apk_version)
+        logger.debug("use apk_version: %s", __apk_version__)
         # install apk when not installed or version not match, dev version always keep
         main_apk_info = self._dev.app_info("com.github.uiautomator")
         if main_apk_info is None:
             self._install_apk(main_apk)
-        elif main_apk_info.version_name != apk_version:
-            if "dev" in main_apk_info.version_name or "dirty" in main_apk_info.version_name:
+        elif main_apk_info.version_name != __apk_version__:
+            if re.match(r"([\d.]+)\-(\d+)\-\w+", main_apk_info.version_name) or "dirty" in main_apk_info.version_name:
                 logger.debug("skip version check for %s", main_apk_info.version_name)
+            elif is_version_compatiable(__apk_version__, main_apk_info.version_name):
+                logger.debug("apk version compatiable, expect %s, actual %s", __apk_version__, main_apk_info.version_name)
             else:
-                logger.debug("apk version not match, reinstall")
+                logger.debug("apk version not ok, expect %s, actual %s", __apk_version__, main_apk_info.version_name)
                 self._dev.uninstall("com.github.uiautomator")
                 self._dev.uninstall("com.github.uiautomator.test")
                 self._install_apk(main_apk)
@@ -226,7 +218,7 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
 
         if self._dev.app_info("com.github.uiautomator.test") is None:
             self._install_apk(test_apk)
-
+    
     def _install_apk(self, apk_path: Path):
         logger.debug("Install %s", apk_path)
         self._dev.shell("mkdir -p /data/local/tmp/u2")
@@ -236,7 +228,7 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
         # -t: allow test packages
         # -d: allow version code downgrade
         self._dev.shell(['pm', 'install', '-r', '-t', '-d', target_path])
-
+    
     def _wait_instrument_ready(self, timeout: float):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -248,7 +240,7 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
                 raise LaunchUiAutomationError(error_message, output)
             if "INSTRUMENTATION_STATUS_CODE:" in output:
                 status_code = int(re.search(r"INSTRUMENTATION_STATUS_CODE: (-?\d+)", output).group(1))
-                if status_code == 1:  # success
+                if status_code == 1: # success
                     logger.debug("am instrument success, status_code: %d", status_code)
                     return
                 raise LaunchUiAutomationError("am instrument error", f'CODE:{status_code}', output)
@@ -256,14 +248,13 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
                 raise LaunchUiAutomationError("am instrument quit", output)
             time.sleep(.5)
         raise LaunchUiAutomationError("am instrument launch timeout", f"{timeout}s", output)
-
+    
     def _wait_stub_ready(self, timeout: float):
         deadline = time.time() + timeout
         while time.time() < deadline:
             output = self._process.output.decode("utf-8", errors="ignore")
             if "already registered" in output:
-                raise AccessibilityServiceAlreadyRegisteredError(
-                    "Possibly another UiAutomation service is running, you may find it output by \"adb shell ps -u shell\"", )
+                raise AccessibilityServiceAlreadyRegisteredError("Possibly another UiAutomation service is running, you may find it output by \"adb shell ps -u shell\"",)
             if self._process.pool() is not None:
                 raise LaunchUiAutomationError("uiautomator2 server quit", output)
             if self._check_alive():
@@ -276,7 +267,7 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
             return response.content == b"pong"
         except HTTPError:
             return False
-
+        
     def _wait_ready(self, launch_timeout=30, service_timeout=30):
         """Wait until uiautomator2 server is ready"""
         # wait am instrument start
@@ -286,12 +277,20 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
         self._dev.shell("am startservice -a com.github.uiautomator.ACTION_START")
         self._dev.shell("am start -n com.github.uiautomator/.ToastActivity -e showFloatWindow true")
         self._wait_stub_ready(service_timeout)
-
-    def stop_uiautomator(self):
+        time.sleep(1) # wait ATX goto background
+    
+    def stop_uiautomator(self, wait=True):
         with self._lock:
             if self._process:
                 self._process.kill()
                 self._process = None
+        # wait server quit
+        if wait:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if not self._check_alive():
+                    return
+                time.sleep(.5)
 
     def jsonrpc_call(self, method: str, params: Any = None, timeout: float = 10) -> Any:
         """Send jsonrpc call to uiautomator2 server"""
@@ -299,14 +298,14 @@ class BasicUiautomatorServer(AbstractUiautomatorServer):
             return _jsonrpc_call(self._dev, method, params, timeout, self._debug)
         except (HTTPError, UiAutomationNotConnectedError) as e:
             logger.debug("uiautomator2 is not ok, error: %s", e)
+            self.stop_uiautomator()
             self.start_uiautomator()
             return _jsonrpc_call(self._dev, method, params, timeout, self._debug)
-
 
 class SimpleUiautomatorServer(BasicUiautomatorServer, AbstractUiautomatorServer):
     @property
     def info(self) -> Dict[str, Any]:
         return self.jsonrpc_call("deviceInfo")
-
+    
     def dump_hierarchy(self, compressed: bool = False, pretty: bool = False) -> str:
         return self.jsonrpc_call("dumpWindowHierarchy", [compressed, pretty])

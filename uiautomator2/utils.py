@@ -7,6 +7,7 @@ import shlex
 import threading
 import typing
 from typing import Union
+import warnings
 
 from uiautomator2._proto import Direction
 from uiautomator2.exceptions import SessionBrokenError, UiObjectNotFoundError
@@ -209,6 +210,42 @@ def thread_safe_wrapper(fn: typing.Callable):
             return fn(self, *args, **kwargs)
 
     return inner
+
+
+
+def is_version_compatiable(expect_version: str, actual_version: str) -> bool:
+    """
+    Check if the actual version is compatiable with the expect version
+
+    Args:
+        expect_version: expect version, e.g. 1.0.0
+        actual_version: actual version, e.g. 1.0.0
+
+    Returns:
+        bool: True if compatiable, otherwise False
+    """
+    def _parse_version(version: str):
+        return tuple(map(int, version.split(".")))
+
+    evs = _parse_version(expect_version)
+    avs = _parse_version(actual_version)
+    assert len(evs) == len(avs) == 3, "version format error"
+    if evs[0] == avs[0]:
+        if evs[1] < avs[1]:
+            return True
+        if evs[1] == avs[1]:
+            return evs[2] <= avs[2]
+    return False
+
+
+def deprecated(reason):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            warnings.warn(f"Function '{func.__name__}' is deprecated: {reason}", DeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 if __name__ == "__main__":
