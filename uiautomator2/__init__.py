@@ -6,42 +6,44 @@ from __future__ import absolute_import, print_function
 import base64
 import contextlib
 import dataclasses
+import io
 import logging
 import os
 import re
+import string
 import time
 import warnings
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
 
 import adbutils
-from deprecated import deprecated
 from lxml import etree
 from retry import retry
+from PIL import Image
 
 from uiautomator2.core import BasicUiautomatorServer
 
 from uiautomator2 import xpath
 from uiautomator2._proto import HTTP_TIMEOUT, SCROLL_STEPS, Direction
 from uiautomator2._selector import Selector, UiObject
-from uiautomator2.exceptions import AdbShellError, BaseException, DeviceError, HierarchyEmptyError, SessionBrokenError
+from uiautomator2._input import InputMethodMixIn
+from uiautomator2.exceptions import AdbShellError, BaseException, ConnectError, DeviceError, HierarchyEmptyError, SessionBrokenError
 from uiautomator2.settings import Settings
 from uiautomator2.swipe import SwipeExt
-from uiautomator2.utils import list2cmdline
+from uiautomator2.utils import image_convert, list2cmdline, deprecated
 from uiautomator2.watcher import WatchContext, Watcher
 from uiautomator2.abstract import AbstractShell, AbstractUiautomatorServer, ShellResponse
+
 
 WAIT_FOR_DEVICE_TIMEOUT = int(os.getenv("WAIT_FOR_DEVICE_TIMEOUT", 20))
 
 logger = logging.getLogger(__name__)
 
-
 def enable_pretty_logging(level=logging.DEBUG):
     if not logger.handlers:
         # Configure handler
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            '[%(levelname)1.1s %(asctime)s %(module)s:%(lineno)d pid:%(process)d] %(message)s')
+        formatter = logging.Formatter('[%(levelname)1.1s %(asctime)s %(module)s:%(lineno)d pid:%(process)d] %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
@@ -66,13 +68,16 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
             self._dev = self._wait_for_device()
         self._debug = False
         BasicUiautomatorServer.__init__(self, self._dev)
-
+    
     def _wait_for_device(self, timeout=10) -> adbutils.AdbDevice:
         """
         wait for device came online, if device is remote, reconnect every 1s
 
         Returns:
-            adbutils.AdbDevice or None
+            adbutils.AdbDevice
+        
+        Raises:
+            ConnectError
         """
         for d in adbutils.adb.device_list():
             if d.serial == self._serial:
@@ -99,12 +104,12 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
             except (adbutils.AdbError, adbutils.AdbTimeout):
                 continue
             return adb.device(self._serial)
-        return None
+        raise ConnectError(f"device {self._serial} not online")
 
     @property
     def adb_device(self) -> adbutils.AdbDevice:
         return self._dev
-
+    
     @cached_property
     def settings(self) -> Settings:
         return Settings(self)
@@ -139,7 +144,7 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
     @property
     def info(self) -> Dict[str, Any]:
         return self.jsonrpc.deviceInfo(http_timeout=10)
-
+    
     @property
     def device_info(self) -> Dict[str, Any]:
         serial = self._dev.getprop("ro.serialno")
@@ -195,8 +200,7 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
         # https://developer.android.google.cn/training/monitoring-device-state/doze-standby
         # 让uiautomator进程不进入doze模式
         # help: dumpsys deviceidle help
-        self.shell(
-            "dumpsys deviceidle whitelist +com.github.uiautomator; dumpsys deviceidle whitelist +com.github.uiautomator.test")
+        self.shell("dumpsys deviceidle whitelist +com.github.uiautomator; dumpsys deviceidle whitelist +com.github.uiautomator.test")
         self.stop_uiautomator()
         self.start_uiautomator()
 
@@ -220,8 +224,8 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
         # FIXME: check if windows still need f.close
         # with open(dst, 'wb') as f:
         #     shutil.copyfileobj(r.raw, f)
-        # if _mswindows:  # FIXME: check hotfix windows file size zero bug
-        #     f.close()
+            # if _mswindows:  # FIXME: check hotfix windows file size zero bug
+            #     f.close()
 
 
 class _Device(_BaseClient):
@@ -234,7 +238,7 @@ class _Device(_BaseClient):
         w, h = self._dev.window_size()
         return w, h
 
-    def screenshot(self, filename: Optional[str] = None, format="pillow"):
+    def screenshot(self, filename: Optional[str] = None, format="pillow", display_id: Optional[int] = None):
         """
         Take screenshot of device
 
@@ -244,26 +248,25 @@ class _Device(_BaseClient):
         Args:
             filename (str): saved filename, if filename is set then return None
             format (str): used when filename is empty. one of ["pillow", "opencv", "raw"]
+            display_id (int): use specific display if device has multiple screen
 
         Examples:
             screenshot("saved.jpg")
             screenshot().save("saved.png")
             cv2.imwrite('saved.jpg', screenshot(format='opencv'))
         """
-        pil_img = self._dev.screenshot()
+        if display_id is None:
+            base64_data = self.jsonrpc.takeScreenshot(1, 80)
+            jpg_raw = base64.b64decode(base64_data)
+            pil_img = Image.open(io.BytesIO(jpg_raw))
+        else:
+            pil_img = self._dev.screenshot(display_id=display_id)
+        
         if filename:
             pil_img.save(filename)
             return
-        if format == 'pillow':
-            return pil_img
-        elif format == 'opencv':
-            pil_img = pil_img.convert("RGB")
-            import cv2
-            import numpy as np
-            return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        elif format == 'raw':
-            return pil_img.tobytes()
-
+        return image_convert(pil_img, format)
+        
     def dump_hierarchy(self, compressed=False, pretty=False, max_depth: int = None) -> str:
         """
         Dump window hierarchy
@@ -281,7 +284,7 @@ class _Device(_BaseClient):
         except HierarchyEmptyError:
             logger.warning("dump empty, return empty xml")
             content = '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?>\r\n<hierarchy rotation="0" />'
-
+        
         if pretty:
             root = etree.fromstring(content.encode("utf-8"))
             content = etree.tostring(root, pretty_print=True, encoding=str)
@@ -294,7 +297,7 @@ class _Device(_BaseClient):
         content = self.jsonrpc.dumpWindowHierarchy(compressed, max_depth)
         if content == "":
             raise HierarchyEmptyError("dump hierarchy is empty")
-
+        
         # '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?>\r\n<hierarchy rotation="0" />'
         if '<hierarchy rotation="0" />' in content:
             logger.debug("dump empty, call clear_traversed_text and retry")
@@ -408,12 +411,13 @@ class _Device(_BaseClient):
 
     def long_click(self, x, y, duration: float = .5):
         '''long click at arbitrary coordinates.
+        
         Args:
             duration (float): seconds of pressed
         '''
         x, y = self.pos_rel2abs(x, y)
         with self._operation_delay("click"):
-            return self.touch.down(x, y).sleep(duration).up(x, y)
+            self.jsonrpc.click(x, y, int(duration*1000))
 
     def swipe(self, fx, fy, tx, ty, duration: Optional[float] = None, steps: Optional[int] = None):
         """
@@ -484,6 +488,23 @@ class _Device(_BaseClient):
                     key, meta) if meta else self.jsonrpc.pressKeyCode(key)
             else:
                 return self.jsonrpc.pressKey(key)
+    
+    def long_press(self, key: Union[int, str]):
+        """
+        long press key via name or key code
+
+        Args:
+            key: key name or key code
+        
+        Examples:
+            long_press("home") same as "adb shell input keyevent --longpress KEYCODE_HOME"
+        """
+        with self._operation_delay("press"):
+            if isinstance(key, int):
+                self.shell("input keyevent --longpress %d" % key)
+            else:
+                key = key.upper()
+                self.shell(f"input keyevent --longpress {key}")
 
     def screen_on(self):
         self.jsonrpc.wakeUp()
@@ -538,8 +559,9 @@ class _Device(_BaseClient):
         return self(**kwargs).exists
 
     @property
-    def clipboard(self):
-        return self.jsonrpc.getClipboard()
+    def clipboard(self) -> str:
+        return super().clipboard
+        # return self.jsonrpc.getClipboard() # FIXME(ssx): bug
 
     @clipboard.setter
     def clipboard(self, text: str):
@@ -620,7 +642,7 @@ class _Device(_BaseClient):
                 return obj.jsonrpc.makeToast(text, duration * 1000)
 
         return Toast()
-
+    
     def __call__(self, **kwargs):
         return UiObject(self, Selector(**kwargs))
 
@@ -648,7 +670,7 @@ class _AppMixIn(AbstractShell):
         if len(output.strip().splitlines()) <= 1:
             output = self.shell("ps").output
         return output.strip().replace("\r\n", "\n")
-
+        
     def _pidof_app(self, package_name) -> Optional[int]:
         """
         Return pid of package name
@@ -705,8 +727,7 @@ class _AppMixIn(AbstractShell):
             time.sleep(.5)
         return False
 
-    def app_start(self, package_name: str, activity: Optional[str] = None, wait: bool = False, stop: bool = False,
-                  use_monkey: bool = False):
+    def app_start(self, package_name: str, activity: Optional[str] = None, wait: bool = False, stop: bool = False, use_monkey: bool = False):
         """ Launch application
         Args:
             package_name (str): package name
@@ -876,6 +897,50 @@ class _AppMixIn(AbstractShell):
             "versionCode": info.version_code,
         }
 
+    def app_auto_grant_permissions(self, package_name: str):
+        """ auto grant permissions
+
+        Args:
+            package_name (str): package name
+        
+        Help of "adb shell pm":
+            grant [--user USER_ID] PACKAGE PERMISSION
+            revoke [--user USER_ID] PACKAGE PERMISSION
+                These commands either grant or revoke permissions to apps.  The permissions
+                must be declared as used in the app's manifest, be runtime permissions
+                (protection level dangerous), and the app targeting SDK greater than Lollipop MR1 (API level 22).
+        
+        Help of "Android official pm" see <https://developer.android.com/tools/adb#pm>
+            Grant a permission to an app. On devices running Android 6.0 (API level 23) and higher,
+              the permission can be any permission declared in the app manifest.
+            On devices running Android 5.1 (API level 22) and lower,
+              must be an optional permission defined by the app.
+        """
+        sdk_version_output = self.shell(['getprop', 'ro.build.version.sdk']).output.strip()
+        sdk_version = int(sdk_version_output) if sdk_version_output.isdigit() else None
+        if sdk_version is None:
+            logger.warning("can't get sdk version")
+            return
+        if sdk_version < 23:
+            # TODO: support android 5.1 (API 22) and lower
+            logger.warning("auto grant permissions only support android 6.0+ (API 23+)")
+            return
+        
+        dumpsys_package_output = self.shell(['dumpsys', 'package',  package_name]).output
+        target_sdk_match = re.search(r'targetSdk=(\d+)', dumpsys_package_output)
+        if not target_sdk_match:
+            logger.warning("can't get targetSdk from dumpsys package")
+            return
+        target_sdk = int(target_sdk_match.group(1))
+        if target_sdk < 22:
+            logger.warning("auto grant permissions only support app targetSdk >= 22")
+            return
+            
+        permissions = re.findall(r'(android\.\w*\.?permission\.\w+): granted=false', dumpsys_package_output)
+        for permission in permissions:
+            self.shell(['pm', 'grant', package_name, permission])
+            logger.info(f'auto grant permission {permission}')
+
 
 class _DeprecatedMixIn:
     @property
@@ -895,7 +960,7 @@ class _DeprecatedMixIn:
     def click_post_delay(self, v: Union[int, float]):
         self.settings['post_delay'] = v
 
-    @deprecated(version="2.0.0", reason="use d.toast.show(text, duration) instead")
+    @deprecated(reason="use d.toast.show(text, duration) instead")
     def make_toast(self, text, duration=1.0):
         """ Show toast
         Args:
@@ -905,123 +970,11 @@ class _DeprecatedMixIn:
         return self.jsonrpc.makeToast(text, duration * 1000)
 
     def unlock(self):
-        """ unlock screen """
-        self.press("wakeup")
+        """ unlock screen with swipe from left-bottom to right-top """
+        # if not self.info['screenOn']:
+        self.shell("input keyevent WAKEUP")
         self.swipe(0.1, 0.9, 0.9, 0.1)
 
-
-class _InputMethodMixIn(AbstractShell):
-    def set_fastinput_ime(self, enable: bool = True):
-        """ Enable of Disable FastInputIME """
-        fast_ime = 'com.github.uiautomator/.FastInputIME'
-        if enable:
-            self.shell(['ime', 'enable', fast_ime])
-            self.shell(['ime', 'set', fast_ime])
-        else:
-            self.shell(['ime', 'disable', fast_ime])
-
-    def send_keys(self, text: str, clear: bool = False):
-        """
-        Args:
-            text (str): text to set
-            clear (bool): clear before set text
-
-        Raises:
-            EnvironmentError
-        """
-        try:
-            self.wait_fastinput_ime()
-            btext = text.encode('utf-8')
-            base64text = base64.b64encode(btext).decode()
-            cmd = "ADB_SET_TEXT" if clear else "ADB_INPUT_TEXT"
-            self.shell(
-                ['am', 'broadcast', '-a', cmd, '--es', 'text', base64text])
-            return True
-        except EnvironmentError:
-            warnings.warn(
-                "set FastInputIME failed. use \"d(focused=True).set_text instead\"",
-                Warning)
-            return self(focused=True).set_text(text)
-            # warnings.warn("set FastInputIME failed. use \"adb shell input text\" instead", Warning)
-            # self.shell(["input", "text", text.replace(" ", "%s")])
-
-    def send_action(self, code):
-        """
-        Simulate input method edito code
-
-        Args:
-            code (str or int): input method editor code
-
-        Examples:
-            send_action("search"), send_action(3)
-
-        Refs:
-            https://developer.android.com/reference/android/view/inputmethod/EditorInfo
-        """
-        self.wait_fastinput_ime()
-        __alias = {
-            "go": 2,
-            "search": 3,
-            "send": 4,
-            "next": 5,
-            "done": 6,
-            "previous": 7,
-        }
-        if isinstance(code, str):
-            code = __alias.get(code, code)
-        self.shell([
-            'am', 'broadcast', '-a', 'ADB_EDITOR_CODE', '--ei', 'code',
-            str(code)
-        ])
-
-    def clear_text(self):
-        """ clear text
-        Raises:
-            EnvironmentError
-        """
-        try:
-            self.wait_fastinput_ime()
-            self.shell(['am', 'broadcast', '-a', 'ADB_CLEAR_TEXT'])
-        except EnvironmentError:
-            # for Android simulator
-            self(focused=True).clear_text()
-
-    def wait_fastinput_ime(self, timeout=5.0):
-        """ wait FastInputIME is ready
-        Args:
-            timeout(float): maxium wait time
-
-        Raises:
-            EnvironmentError
-        """
-        # TODO: 模拟器待兼容 eg. Genymotion, 海马玩, Mumu
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            ime_id, shown = self.current_ime()
-            if ime_id != "com.github.uiautomator/.FastInputIME":
-                self.set_fastinput_ime(True)
-                time.sleep(0.5)
-                continue
-            if shown:
-                return True
-            time.sleep(0.2)
-        raise EnvironmentError("FastInputIME started failed")
-
-    def current_ime(self):
-        """ Current input method
-        Returns:
-            (method_id(str), shown(bool)
-
-        Example output:
-            ("com.github.uiautomator/.FastInputIME", True)
-        """
-        _INPUT_METHOD_RE = re.compile(r'mCurMethodId=([-_./\w]+)')
-        dim, _ = self.shell(['dumpsys', 'input_method'])
-        m = _INPUT_METHOD_RE.search(dim)
-        method_id = None if not m else m.group(1)
-        shown = "mInputShown=true" in dim
-        return (method_id, shown)
 
 
 class _PluginMixIn:
@@ -1036,8 +989,8 @@ class _PluginMixIn:
         return Watcher(self)
 
     @cached_property
-    def xpath(self) -> xpath.XPath:
-        return xpath.XPath(self)
+    def xpath(self) -> xpath.XPathEntry:
+        return xpath.XPathEntry(self)
 
     @cached_property
     def image(self):
@@ -1054,61 +1007,37 @@ class _PluginMixIn:
         return SwipeExt(self)
 
 
-class Device(_Device, _AppMixIn, _PluginMixIn, _InputMethodMixIn, _DeprecatedMixIn):
+class Device(_Device, _AppMixIn, _PluginMixIn, InputMethodMixIn, _DeprecatedMixIn):
     """ Device object """
-
-    @property
-    def info(self) -> Dict[str, Any]:
-        """ return device info, make sure currentPackageName is set
-        
-        Return example:
-           {'currentPackageName': 'io.appium.android.apis',
-            'displayHeight': 720,
-            'displayRotation': 3,
-            'displaySizeDpX': 780,
-            'displaySizeDpY': 360,
-            'displayWidth': 1560,
-            'productName': 'ELE-AL00',
-            'screenOn': True,
-            'sdkInt': 29,
-            'naturalOrientation': False}
-        """
-        _info = super().info
-        if _info.get('currentPackageName') is None:
-            try:
-                _info['currentPackageName'] = self.app_current().get('package')
-            except DeviceError:
-                pass
-        return _info
+    pass
 
 
 class Session(Device):
     """Session keeps watch the app status
     each jsonrpc call will check if the package is still running
     """
-
     def __init__(self, dev: adbutils.AdbDevice, package_name: str):
         super().__init__(dev)
         self._package_name = package_name
         self._pid = self.app_wait(self._package_name)
-
+    
     def running(self) -> bool:
         return self._pid == self._pidof_app(self._package_name)
 
     @property
     def pid(self) -> int:
         return self._pid
-
+        
     def jsonrpc_call(self, method: str, params: Any = None, timeout: float = 10) -> Any:
         if not self.running():
             raise SessionBrokenError(f"app:{self._package_name} pid:{self._pid} is quit")
         return super().jsonrpc_call(method, params, timeout)
-
+    
     def restart(self):
         """ restart app """
         self.app_start(self._package_name, wait=True, stop=True)
         self._pid = self._pidof_app(self._package_name)
-
+    
     def close(self):
         """ close app """
         self.app_stop(self._package_name)

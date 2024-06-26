@@ -103,8 +103,9 @@ Empty
   - **[Stop an app](#stop-an-app)**
   - **[Stop all running apps](#stop-all-running-apps)**
   - **[Push and pull files](#push-and-pull-files)**
-  - **[Auto click permission dialogs](#auto-click-permission-dialogs)**
-  - **[Open Scheme](#open-scheme)**
+  - **[Other app operations](#other-app-operations)**
+  ```
+  cheme)**
 
 **[UI automation](#basic-api-usages)**
   - **[Shell commands](#shell-commands)**
@@ -353,26 +354,17 @@ d.app_wait("com.example.android", timeout=20.0) # 最长等待时间20s（默认
     d.pull("/sdcard/some-file-not-exists.txt", "tmp.txt")
     ```
 
-
-### ~~Auto click permission dialogs~~ (Removed)
-**注意注意** `disable_popups`函数，检测发现很不稳定，暂时不要使用，等候通知。
-<!-- 
-Import in version 0.1.1
+### Other app operations
 
 ```python
-d.disable_popups() # automatic skip popups
-d.disable_popups(False) # disable automatic skip popups
-```
+# grant all the permissions
+d.app_auto_grant_permissions("io.appium.android.apis")
 
-![popup](docs/img/popup.png) -->
-
-### Open Scheme
-
-```python
+# open scheme
 d.open_url("appname://appnamehost")
+# same as
+# adb shell am start -a android.intent.action.VIEW -d "appname://appnamehost"
 ```
-
-等价于 `adb shell am start -a android.intent.action.VIEW -d "appname://appnamehost"`
 
 ## Basic API Usages
 This part showcases how to perform common device operations:
@@ -553,12 +545,24 @@ Below is a possible output:
 ### Clipboard
 Get of set clipboard content
 
-设置粘贴板内容或获取内容 (目前已知问题是9.0之后的后台程序无法获取剪贴板的内容)
+设置粘贴板内容或获取内容
 
 * clipboard/set_clipboard
 
     ```python
-    d.set_clipboard('text', 'label')
+    d.clipboard = 'hello-world'
+    # or
+    d.set_clipboard('hello-world', 'label')
+
+    ```
+
+Get clipboard content
+
+>  get clipboard requires IME(com.github.uiautomator/.AdbKeyboard) call `d.set_input_ime()` before using it.
+
+    ```python
+    
+    # get clipboard content
     print(d.clipboard)
     ```
 
@@ -1111,6 +1115,10 @@ with d.watch_context() as ctx:
     ctx.when("确定").click()
     # 上面三行代码是立即执行完的，不会有什么等待
     
+    # 监控到元素后，，等待xx秒后再点击（某些场景，监控到指定元素后，不一定需要马上点击，需要等待一定时间）
+    # delay 参数是等待时间，单位是秒，默认是0秒
+    ctx.when("确认").click(delay=3.0) 
+    
     ctx.wait_stable() # 开启弹窗监控，并等待界面稳定（两个弹窗检查周期内没有弹窗代表稳定）
 
     # 使用call函数来触发函数回调
@@ -1270,22 +1278,23 @@ Refs: [Google uiautomator Configurator](https://developer.android.com/reference/
 这种方法通常用于不知道控件的情况下的输入。第一步需要切换输入法，然后发送adb广播命令，具体使用方法如下
 
 ```python
-d.set_fastinput_ime(True) # 切换成FastInputIME输入法
 d.send_keys("你好123abcEFG") # adb广播输入
-d.clear_text() # 清除输入框所有内容(Require android-uiautomator.apk version >= 1.0.7)
-d.set_fastinput_ime(False) # 切换成正常的输入法
-d.send_action("search") # 模拟输入法的搜索
+d.send_keys("你好123abcEFG", clear=True) # adb广播输入
+
+d.clear_text() # 清除输入框所有内容
+
+d.send_action() # 根据输入框的需求，自动执行回车、搜索等指令, Added in version 3.1
+# 也可以指定发送的输入法action, eg: d.send_action("search") 支持 go, search, send, next, done, previous
 ```
 
-**send_action** 说明
 
-该函数可以使用的参数有 `go search send next done previous`
 
-_什么时候该使用这个函数呢？_
+```python
+print(d.current_ime()) # 获取当前输入法ID
 
-有些时候在EditText中输入完内容之后，调用`press("search")` or `press("enter")`发现并没有什么反应。
-这个时候就需要`send_action`函数了，这里用到了只有输入法才能用的[IME_ACTION_CODE](https://developer.android.com/reference/android/view/inputmethod/EditorInfo)。
-`send_action`先broadcast命令发送给输入法操作`IME_ACTION_CODE`，由输入法完成后续跟EditText的通信。（原理我不太清楚，有了解的，提issue告诉我)
+```
+
+> 更多参考: [IME_ACTION_CODE](https://developer.android.com/reference/android/view/inputmethod/EditorInfo)
 
 ### Toast (2.2版本之后有添加回来)
 Show Toast (好像有点bug)
