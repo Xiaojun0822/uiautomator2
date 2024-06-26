@@ -971,9 +971,9 @@ class _DeprecatedMixIn:
 
     def unlock(self):
         """ unlock screen with swipe from left-bottom to right-top """
-        if not self.info['screenOn']:
-            self.shell("input keyevent WAKEUP")
-            self.swipe(0.1, 0.9, 0.9, 0.1)
+        # if not self.info['screenOn']:
+        self.shell("input keyevent WAKEUP")
+        self.swipe(0.1, 0.9, 0.9, 0.1)
 
 
 
