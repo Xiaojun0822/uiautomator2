@@ -1,13 +1,13 @@
 import logging
 import time
 import warnings
-from typing import Optional, Tuple
 
+import requests
 from PIL import Image
 from retry import retry
 
 from uiautomator2._proto import SCROLL_STEPS
-from uiautomator2.exceptions import HTTPError, UiObjectNotFoundError
+from uiautomator2.exceptions import UiObjectNotFoundError
 from uiautomator2.utils import Exists, intersect
 
 
@@ -123,12 +123,13 @@ class UiObject(object):
         return Exists(self)
 
     @property
+    @retry(UiObjectNotFoundError, delay=.5, tries=3, jitter=0.1, logger=logging) # yapf: disable
     def info(self):
         '''ui object info.'''
         return self.jsonrpc.objInfo(self.selector)
     
-    def screenshot(self, display_id: Optional[int] = None) -> Image.Image:
-        im = self.session.screenshot(display_id=display_id)
+    def screenshot(self) -> Image.Image:
+        im = self.session.screenshot()
         return im.crop(self.bounds())
 
     def click(self, timeout=None, offset=None):
@@ -155,7 +156,7 @@ class UiObject(object):
         # if delay:
         #     time.sleep(delay)
 
-    def bounds(self) -> Tuple[int, int, int, int]:
+    def bounds(self):
         """
         Returns:
             left_top_x, left_top_y, right_bottom_x, right_bottom_y
@@ -202,7 +203,7 @@ class UiObject(object):
             maxretry -= 1
         return False
 
-    def click_exists(self, timeout=0) -> bool:
+    def click_exists(self, timeout=0):
         try:
             self.click(timeout=timeout)
             return True
@@ -312,7 +313,7 @@ class UiObject(object):
                 return self.jsonrpc.waitForExists(self.selector,
                                                   int(timeout * 1000),
                                                   http_timeout=http_wait)
-            except HTTPError as e:
+            except requests.ReadTimeout as e:
                 warnings.warn("waitForExists readTimeout: %s" % e,
                               RuntimeWarning)
                 return self.exists()
@@ -321,7 +322,7 @@ class UiObject(object):
                 return self.jsonrpc.waitUntilGone(self.selector,
                                                   int(timeout * 1000),
                                                   http_timeout=http_wait)
-            except HTTPError as e:
+            except requests.ReadTimeout as e:
                 warnings.warn("waitForExists readTimeout: %s" % e,
                               RuntimeWarning)
                 return not self.exists()

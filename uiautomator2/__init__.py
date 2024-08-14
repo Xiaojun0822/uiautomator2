@@ -9,13 +9,13 @@ import dataclasses
 import logging
 import os
 import re
-import string
 import time
 import warnings
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
 
 import adbutils
+from deprecated import deprecated
 from lxml import etree
 from retry import retry
 
@@ -24,11 +24,10 @@ from uiautomator2.core import BasicUiautomatorServer
 from uiautomator2 import xpath
 from uiautomator2._proto import HTTP_TIMEOUT, SCROLL_STEPS, Direction
 from uiautomator2._selector import Selector, UiObject
-from uiautomator2._input import InputMethodMixIn
-from uiautomator2.exceptions import AdbShellError, BaseException, ConnectError, DeviceError, HierarchyEmptyError, SessionBrokenError
+from uiautomator2.exceptions import AdbShellError, BaseException, DeviceError, HierarchyEmptyError, SessionBrokenError
 from uiautomator2.settings import Settings
 from uiautomator2.swipe import SwipeExt
-from uiautomator2.utils import list2cmdline, deprecated
+from uiautomator2.utils import list2cmdline
 from uiautomator2.watcher import WatchContext, Watcher
 from uiautomator2.abstract import AbstractShell, AbstractUiautomatorServer, ShellResponse
 
@@ -72,10 +71,7 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
         wait for device came online, if device is remote, reconnect every 1s
 
         Returns:
-            adbutils.AdbDevice
-        
-        Raises:
-            ConnectError
+            adbutils.AdbDevice or None
         """
         for d in adbutils.adb.device_list():
             if d.serial == self._serial:
@@ -102,7 +98,7 @@ class _BaseClient(BasicUiautomatorServer, AbstractUiautomatorServer, AbstractShe
             except (adbutils.AdbError, adbutils.AdbTimeout):
                 continue
             return adb.device(self._serial)
-        raise ConnectError(f"device {self._serial} not online")
+        return None
 
     @property
     def adb_device(self) -> adbutils.AdbDevice:
@@ -236,7 +232,7 @@ class _Device(_BaseClient):
         w, h = self._dev.window_size()
         return w, h
 
-    def screenshot(self, filename: Optional[str] = None, format="pillow", display_id: Optional[int] = None):
+    def screenshot(self, filename: Optional[str] = None, format="pillow"):
         """
         Take screenshot of device
 
@@ -246,14 +242,13 @@ class _Device(_BaseClient):
         Args:
             filename (str): saved filename, if filename is set then return None
             format (str): used when filename is empty. one of ["pillow", "opencv", "raw"]
-            display_id (int): use specific display if device has multiple screen
 
         Examples:
             screenshot("saved.jpg")
             screenshot().save("saved.png")
             cv2.imwrite('saved.jpg', screenshot(format='opencv'))
         """
-        pil_img = self._dev.screenshot(display_id=display_id)
+        pil_img = self._dev.screenshot()
         if filename:
             pil_img.save(filename)
             return
@@ -411,13 +406,12 @@ class _Device(_BaseClient):
 
     def long_click(self, x, y, duration: float = .5):
         '''long click at arbitrary coordinates.
-        
         Args:
             duration (float): seconds of pressed
         '''
         x, y = self.pos_rel2abs(x, y)
         with self._operation_delay("click"):
-            self.jsonrpc.click(x, y, int(duration*1000))
+            return self.touch.down(x, y).sleep(duration).up(x, y)
 
     def swipe(self, fx, fy, tx, ty, duration: Optional[float] = None, steps: Optional[int] = None):
         """
@@ -488,23 +482,6 @@ class _Device(_BaseClient):
                     key, meta) if meta else self.jsonrpc.pressKeyCode(key)
             else:
                 return self.jsonrpc.pressKey(key)
-    
-    def long_press(self, key: Union[int, str]):
-        """
-        long press key via name or key code
-
-        Args:
-            key: key name or key code
-        
-        Examples:
-            long_press("home") same as "adb shell input keyevent --longpress KEYCODE_HOME"
-        """
-        with self._operation_delay("press"):
-            if isinstance(key, int):
-                self.shell("input keyevent --longpress %d" % key)
-            else:
-                key = key.upper()
-                self.shell(f"input keyevent --longpress {key}")
 
     def screen_on(self):
         self.jsonrpc.wakeUp()
@@ -559,9 +536,8 @@ class _Device(_BaseClient):
         return self(**kwargs).exists
 
     @property
-    def clipboard(self) -> str:
-        return super().clipboard
-        # return self.jsonrpc.getClipboard() # FIXME(ssx): bug
+    def clipboard(self):
+        return self.jsonrpc.getClipboard()
 
     @clipboard.setter
     def clipboard(self, text: str):
@@ -897,51 +873,6 @@ class _AppMixIn(AbstractShell):
             "versionCode": info.version_code,
         }
 
-    def app_auto_grant_permissions(self, package_name: str):
-        """ auto grant permissions
-
-        Args:
-            package_name (str): package name
-        
-        Help of "adb shell pm":
-            grant [--user USER_ID] PACKAGE PERMISSION
-            revoke [--user USER_ID] PACKAGE PERMISSION
-                These commands either grant or revoke permissions to apps.  The permissions
-                must be declared as used in the app's manifest, be runtime permissions
-                (protection level dangerous), and the app targeting SDK greater than Lollipop MR1 (API level 22).
-        
-        Help of "Android official pm" see <https://developer.android.com/tools/adb#pm>
-            Grant a permission to an app. On devices running Android 6.0 (API level 23) and higher,
-              the permission can be any permission declared in the app manifest.
-            On devices running Android 5.1 (API level 22) and lower,
-              must be an optional permission defined by the app.
-        """
-        sdk_version_output = self.shell(['getprop', 'ro.build.version.sdk']).output.strip()
-        sdk_version = int(sdk_version_output) if sdk_version_output.isdigit() else None
-        if sdk_version is None:
-            logger.warning("can't get sdk version")
-            return
-        if sdk_version < 23:
-            # TODO: support android 5.1 (API 22) and lower
-            logger.warning("auto grant permissions only support android 6.0+ (API 23+)")
-            return
-        
-        dumpsys_package_output = self.shell(['dumpsys', 'package',  package_name]).output
-        target_sdk_match = re.search(r'targetSdk=(\d+)', dumpsys_package_output)
-        if not target_sdk_match:
-            logger.warning("can't get targetSdk from dumpsys package")
-            return
-        target_sdk = int(target_sdk_match.group(1))
-        if target_sdk < 22:
-            logger.warning("auto grant permissions only support app targetSdk >= 22")
-            return
-            
-        permissions = re.findall(r'(android\.\w*\.?permission\.\w+): granted=false', dumpsys_package_output)
-        for permission in permissions:
-            self.shell(['pm', 'grant', package_name, permission])
-            logger.info(f'auto grant permission {permission}')
-
-
 class _DeprecatedMixIn:
     @property
     def wait_timeout(self):  # wait element timeout
@@ -960,7 +891,7 @@ class _DeprecatedMixIn:
     def click_post_delay(self, v: Union[int, float]):
         self.settings['post_delay'] = v
 
-    @deprecated(reason="use d.toast.show(text, duration) instead")
+    @deprecated(version="2.0.0", reason="use d.toast.show(text, duration) instead")
     def make_toast(self, text, duration=1.0):
         """ Show toast
         Args:
@@ -970,11 +901,124 @@ class _DeprecatedMixIn:
         return self.jsonrpc.makeToast(text, duration * 1000)
 
     def unlock(self):
-        """ unlock screen with swipe from left-bottom to right-top """
+        """ unlock screen """
         if not self.info['screenOn']:
-            self.shell("input keyevent WAKEUP")
+            self.press("power")
             self.swipe(0.1, 0.9, 0.9, 0.1)
 
+
+class _InputMethodMixIn(AbstractShell):
+    def set_fastinput_ime(self, enable: bool = True):
+        """ Enable of Disable FastInputIME """
+        fast_ime = 'com.github.uiautomator/.FastInputIME'
+        if enable:
+            self.shell(['ime', 'enable', fast_ime])
+            self.shell(['ime', 'set', fast_ime])
+        else:
+            self.shell(['ime', 'disable', fast_ime])
+
+    def send_keys(self, text: str, clear: bool = False):
+        """
+        Args:
+            text (str): text to set
+            clear (bool): clear before set text
+
+        Raises:
+            EnvironmentError
+        """
+        try:
+            self.wait_fastinput_ime()
+            btext = text.encode('utf-8')
+            base64text = base64.b64encode(btext).decode()
+            cmd = "ADB_SET_TEXT" if clear else "ADB_INPUT_TEXT"
+            self.shell(
+                ['am', 'broadcast', '-a', cmd, '--es', 'text', base64text])
+            return True
+        except EnvironmentError:
+            warnings.warn(
+                "set FastInputIME failed. use \"d(focused=True).set_text instead\"",
+                Warning)
+            return self(focused=True).set_text(text)
+            # warnings.warn("set FastInputIME failed. use \"adb shell input text\" instead", Warning)
+            # self.shell(["input", "text", text.replace(" ", "%s")])
+
+    def send_action(self, code):
+        """
+        Simulate input method edito code
+
+        Args:
+            code (str or int): input method editor code
+
+        Examples:
+            send_action("search"), send_action(3)
+
+        Refs:
+            https://developer.android.com/reference/android/view/inputmethod/EditorInfo
+        """
+        self.wait_fastinput_ime()
+        __alias = {
+            "go": 2,
+            "search": 3,
+            "send": 4,
+            "next": 5,
+            "done": 6,
+            "previous": 7,
+        }
+        if isinstance(code, str):
+            code = __alias.get(code, code)
+        self.shell([
+            'am', 'broadcast', '-a', 'ADB_EDITOR_CODE', '--ei', 'code',
+            str(code)
+        ])
+
+    def clear_text(self):
+        """ clear text
+        Raises:
+            EnvironmentError
+        """
+        try:
+            self.wait_fastinput_ime()
+            self.shell(['am', 'broadcast', '-a', 'ADB_CLEAR_TEXT'])
+        except EnvironmentError:
+            # for Android simulator
+            self(focused=True).clear_text()
+
+    def wait_fastinput_ime(self, timeout=5.0):
+        """ wait FastInputIME is ready
+        Args:
+            timeout(float): maxium wait time
+
+        Raises:
+            EnvironmentError
+        """
+        # TODO: 模拟器待兼容 eg. Genymotion, 海马玩, Mumu
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ime_id, shown = self.current_ime()
+            if ime_id != "com.github.uiautomator/.FastInputIME":
+                self.set_fastinput_ime(True)
+                time.sleep(0.5)
+                continue
+            if shown:
+                return True
+            time.sleep(0.2)
+        raise EnvironmentError("FastInputIME started failed")
+
+    def current_ime(self):
+        """ Current input method
+        Returns:
+            (method_id(str), shown(bool)
+
+        Example output:
+            ("com.github.uiautomator/.FastInputIME", True)
+        """
+        _INPUT_METHOD_RE = re.compile(r'mCurMethodId=([-_./\w]+)')
+        dim, _ = self.shell(['dumpsys', 'input_method'])
+        m = _INPUT_METHOD_RE.search(dim)
+        method_id = None if not m else m.group(1)
+        shown = "mInputShown=true" in dim
+        return (method_id, shown)
 
 
 class _PluginMixIn:
@@ -989,8 +1033,8 @@ class _PluginMixIn:
         return Watcher(self)
 
     @cached_property
-    def xpath(self) -> xpath.XPathEntry:
-        return xpath.XPathEntry(self)
+    def xpath(self) -> xpath.XPath:
+        return xpath.XPath(self)
 
     @cached_property
     def image(self):
@@ -1006,11 +1050,32 @@ class _PluginMixIn:
     def swipe_ext(self) -> SwipeExt:
         return SwipeExt(self)
 
-
-class Device(_Device, _AppMixIn, _PluginMixIn, InputMethodMixIn, _DeprecatedMixIn):
+class Device(_Device, _AppMixIn, _PluginMixIn, _InputMethodMixIn, _DeprecatedMixIn):
     """ Device object """
-    pass
 
+    @property
+    def info(self) -> Dict[str, Any]:
+        """ return device info, make sure currentPackageName is set
+        
+        Return example:
+           {'currentPackageName': 'io.appium.android.apis',
+            'displayHeight': 720,
+            'displayRotation': 3,
+            'displaySizeDpX': 780,
+            'displaySizeDpY': 360,
+            'displayWidth': 1560,
+            'productName': 'ELE-AL00',
+            'screenOn': True,
+            'sdkInt': 29,
+            'naturalOrientation': False}
+        """
+        _info = super().info
+        if _info.get('currentPackageName') is None:
+            try:
+                _info['currentPackageName'] = self.app_current().get('package')
+            except DeviceError:
+                pass
+        return _info
 
 class Session(Device):
     """Session keeps watch the app status

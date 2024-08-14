@@ -10,10 +10,12 @@ import adbutils
 from PIL import Image
 from uiautomator2._proto import Direction
 
+
 class ShellResponse(NamedTuple):
     output: str
     exit_code: int
-
+    
+    
 
 class AbstractUiautomatorServer(abc.ABC):
     @abc.abstractmethod
@@ -29,6 +31,7 @@ class AbstractUiautomatorServer(abc.ABC):
         pass
 
 
+
 class AbstractShell(abc.ABC):
     @abc.abstractmethod
     def shell(self, cmdargs: Union[List[str], str]) -> ShellResponse:
@@ -39,12 +42,11 @@ class AbstractShell(abc.ABC):
     def adb_device(self) -> adbutils.AdbDevice:
         pass
 
-
 class AbstractXPathBasedDevice(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def click(self, x: int, y: int):
         pass
-
+    
     @abc.abstractmethod
     def long_click(self, x: int, y: int):
         pass
@@ -56,7 +58,7 @@ class AbstractXPathBasedDevice(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def swipe(self, fx: int, fy: int, tx: int, ty: int, duration: float):
         """ duration is float type, indicate seconds """
-
+    
     @abc.abstractmethod
     def swipe_ext(self, direction: Direction, scale: float):
         pass
@@ -64,11 +66,11 @@ class AbstractXPathBasedDevice(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def window_size(self) -> Tuple[int, int]:
         """ return (width, height) """
-
+    
     @abc.abstractmethod
     def dump_hierarchy(self) -> str:
         """ return xml content """
-
+    
     @abc.abstractmethod
     def screenshot(self) -> Image.Image:
         """ return PIL.Image.Image """

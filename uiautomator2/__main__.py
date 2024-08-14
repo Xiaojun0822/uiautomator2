@@ -14,6 +14,7 @@ import uiautomator2 as u2
 from uiautomator2.version import __version__
 from uiautomator2 import enable_pretty_logging
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,7 +129,7 @@ def cmd_console(args):
         shell = code.InteractiveConsole(_vars)
         shell.interact(
             banner="Python: %s\nDevice: %s(%s)"
-                   % (platform.python_version(), model, serial)
+            % (platform.python_version(), model, serial)
         )
 
 
@@ -231,7 +232,7 @@ def main():
         for f in c.get('flags', []):
             args = f.get('args')
             if not args:
-                args = ['-' * min(2, len(n)) + n for n in f['name']]
+                args = ['-'*min(2, len(n)) + n for n in f['name']]
             kwargs = f.copy()
             kwargs.pop('name', None)
             kwargs.pop('args', None)
