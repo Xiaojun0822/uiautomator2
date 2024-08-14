@@ -81,8 +81,7 @@ class WatchContext:
 
         self._callbacks[xpath_list] = fn
 
-    def click(self, delay: int | float = 0.0):
-        time.sleep(delay)
+    def click(self):
         self.call(_callback_click)
 
     def _run(self) -> bool:
