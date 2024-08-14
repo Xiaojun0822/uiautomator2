@@ -22,12 +22,12 @@ def cmd_init(args):
     if serial:
         d = u2.connect(serial)
         logger.debug("install apk to %s", d.serial)
-        d._setup_apks()
+        d._setup_jar()
     else:
         for dev in adbutils.adb.iter_device():
             d = u2.connect(dev)
             logger.debug("install apk to %s", d.serial)
-            d._setup_apks()
+            d._setup_jar()
 
 
 def cmd_purge(args):

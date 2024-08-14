@@ -1233,6 +1233,8 @@ d.settings['operation_delay'] = (.5, 1)
 # 其中 double_click, long_click 都对应click
 d.settings['operation_delay_methods'] = ['click', 'swipe', 'drag', 'press']
 d.settings['wait_timeout'] = 20.0 # 默认控件等待时间（原生操作，xpath插件的等待时间）
+
+d.settings['max_depth'] = 50 # 默认50，限制dump_hierarchy返回的元素层级
 ```
 
 对于随着版本升级，设置过期的配置时，会提示Deprecated，但是不会抛异常。
@@ -1296,30 +1298,13 @@ print(d.current_ime()) # 获取当前输入法ID
 
 > 更多参考: [IME_ACTION_CODE](https://developer.android.com/reference/android/view/inputmethod/EditorInfo)
 
-### Toast (2.2版本之后有添加回来)
-Show Toast (好像有点bug)
-
+### Toast
 ```python
-d.toast.show("Hello world")
-d.toast.show("Hello world", 1.0) # show for 1.0s, default 1.0s
+print(d.last_toast) # get last toast, if not toast return None
+d.clear_toast()
 ```
 
-Get Toast
-
-```python
-# [Args]
-# 5.0: max wait timeout. Default 10.0
-# 10.0: cache time. return cache toast if already toast already show up in recent 10 seconds. Default 10.0 (Maybe change in the furture)
-# "default message": return if no toast finally get. Default None
-d.toast.get_message(5.0, 10.0, "default message")
-
-# common usage
-assert "Short message" in d.toast.get_message(5.0, default="")
-
-# clear cached toast
-d.toast.reset()
-# Now d.toast.get_message(0) is None
-```
+> Fixed in version 3.2.0
 
 ### XPath
 Java uiautoamtor中默认是不支持xpath的，所以这里属于扩展的一个功能。速度不是这么的快。
